@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+.env
+estados_tickets.json
+tickets_history.json
+tickets_memory.json
