@@ -3,12 +3,17 @@ from discord.ext import commands
 import asyncio
 import json
 import os
+import time
 from datetime import datetime
 
 import config
 from classifier import classificar_ticket
 from ragnarok_lookup import extrair_pergunta_relevante
-from memory_lookup import buscar_memoria_semelhante, adicionar_memoria_se_nao_existir, contar_memorias
+from memory_lookup import (
+    buscar_memoria_semelhante,
+    adicionar_memoria_se_nao_existir,
+    contar_memorias
+)
 from transcript_learning import extrair_aprendizado_do_transcript
 
 
@@ -16,7 +21,6 @@ intents = discord.Intents.default()
 intents.message_content = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
-
 
 ESTADOS_FILE = "estados_tickets.json"
 HISTORICO_FILE = "tickets_history.json"
@@ -42,11 +46,13 @@ SUCESSO_RESPOSTA = [
     "consegui",
     "agora foi",
     "agora funcionou",
-    "sim",
     "sim resolveu",
     "resolvido",
     "foi resolvido"
 ]
+
+ULTIMA_RESPOSTA_BOT = {}
+ULTIMA_MSG_USUARIO = {}
 
 
 def carregar_estados():
@@ -80,13 +86,13 @@ def salvar_dados_ticket(canal, pergunta=None, resposta=None, categoria=None):
     if canal not in estado_tickets:
         estado_tickets[canal] = {}
 
-    if pergunta:
+    if pergunta is not None:
         estado_tickets[canal]["pergunta"] = pergunta
 
-    if resposta:
+    if resposta is not None:
         estado_tickets[canal]["ultima_resposta"] = resposta
 
-    if categoria:
+    if categoria is not None:
         estado_tickets[canal]["categoria"] = categoria
 
     salvar_estados(estado_tickets)
@@ -134,29 +140,14 @@ def mensagem_igual(texto, lista):
     return texto in lista
 
 
+def normalizar_texto(texto):
+    return (texto or "").strip().lower()
+
+
 def gerar_mencoes(ids):
     if not ids:
         return ""
     return " ".join([f"<@{x}>" for x in ids])
-
-
-def obter_responsaveis(categoria):
-    if categoria == "denuncia":
-        return config.RESPONSAVEIS_DENUNCIAS
-
-    if categoria == "seguranca":
-        return config.RESPONSAVEIS_SEGURANCA
-
-    if categoria == "bug":
-        return config.RESPONSAVEIS_BUGS
-
-    if categoria == "financeiro":
-        return config.RESPONSAVEIS_FINANCEIRO
-
-    if categoria == "sugestao":
-        return config.RESPONSAVEIS_SUGESTOES
-
-    return config.RESPONSAVEIS_SUPORTE_GERAL
 
 
 def obter_responsaveis_por_categoria(categoria):
@@ -306,17 +297,69 @@ def anexar_pergunta_resolvido(texto):
     return f"""{texto}
 
 Isso resolveu seu problema?
-Responda com:
-- sim
-- ou
-- não funcionou
+Responda:
+sim
+ou
+não funcionou
 """
 
 
+def resposta_bot_duplicada(channel_id, texto, janela=8):
+    agora = time.time()
+    ultima = ULTIMA_RESPOSTA_BOT.get(channel_id)
+
+    if not ultima:
+        return False
+
+    ultimo_texto = ultima["texto"]
+    ultimo_tempo = ultima["tempo"]
+
+    if normalizar_texto(ultimo_texto) == normalizar_texto(texto):
+        if agora - ultimo_tempo <= janela:
+            return True
+
+    return False
+
+
+def registrar_resposta_bot(channel_id, texto):
+    ULTIMA_RESPOSTA_BOT[channel_id] = {
+        "texto": texto,
+        "tempo": time.time()
+    }
+
+
+def mensagem_usuario_duplicada(channel_id, author_id, texto, janela=4):
+    agora = time.time()
+    chave = f"{channel_id}:{author_id}"
+    ultima = ULTIMA_MSG_USUARIO.get(chave)
+
+    if not ultima:
+        ULTIMA_MSG_USUARIO[chave] = {"texto": texto, "tempo": agora}
+        return False
+
+    if normalizar_texto(ultima["texto"]) == normalizar_texto(texto):
+        if agora - ultima["tempo"] <= janela:
+            ULTIMA_MSG_USUARIO[chave] = {"texto": texto, "tempo": agora}
+            return True
+
+    ULTIMA_MSG_USUARIO[chave] = {"texto": texto, "tempo": agora}
+    return False
+
+
 async def enviar_resposta(channel, texto):
+    if resposta_bot_duplicada(channel.id, texto):
+        print("Resposta duplicada evitada.")
+        return
+
     async with channel.typing():
         await asyncio.sleep(2)
-    await channel.send(texto)
+
+    await channel.send(
+        texto,
+        allowed_mentions=discord.AllowedMentions(users=True, roles=True, everyone=False)
+    )
+
+    registrar_resposta_bot(channel.id, texto)
 
 
 async def responder_links(channel):
@@ -358,6 +401,8 @@ async def escalar_suporte(channel, categoria):
 
     if mencoes:
         texto = f"{texto}\n\n{mencoes}"
+    else:
+        texto = f"{texto}\n\n⚠️ Nenhum responsável configurado para essa categoria."
 
     await enviar_resposta(channel, texto)
     return texto
@@ -390,7 +435,7 @@ async def capturar_conversa_staff(channel, mensagem_resolvido):
 
     blocos = []
 
-    async for msg in channel.history(limit=15, before=mensagem_resolvido):
+    async for msg in channel.history(limit=20, before=mensagem_resolvido):
         if msg.author.bot:
             continue
 
@@ -528,6 +573,11 @@ async def on_message(message):
     if not nome_canal.startswith("ticket"):
         return
 
+    if not message.author.bot:
+        if mensagem_usuario_duplicada(message.channel.id, message.author.id, message.content):
+            print("Mensagem duplicada do usuário ignorada.")
+            return
+
     canal = message.channel.name
     dados = obter_dados_ticket(canal)
     estado = dados.get("estado", "novo")
@@ -550,8 +600,14 @@ async def on_message(message):
     pergunta = extrair_pergunta_relevante(texto)
     categoria = ajustar_categoria_especial(texto, classificar_ticket(texto))
 
+    print(f"\nCanal: {canal}")
+    print(f"Estado atual: {estado}")
+    print(f"Categoria: {categoria}")
+    print(f"Pergunta: {pergunta}")
+
+    # Se já escalou, Helena não responde mais nada além de "resolvido"
     if estado == "escalado":
-        if mensagem_igual(pergunta, ["resolvido", "resolveu", "sim", "foi resolvido"]):
+        if mensagem_igual(pergunta, SUCESSO_RESPOSTA):
             resposta = await responder_sucesso(message.channel)
             definir_estado(canal, "resolvido")
             salvar_historico(canal, pergunta, resposta, categoria, "resolvido")
@@ -569,22 +625,49 @@ async def on_message(message):
 
             return
 
+        print("Ticket escalado: Helena permaneceu em silêncio.")
         return
 
-    if categoria in ["denuncia_bot", "cheat", "jobfilter", "bug_zeny"]:
+    # Categorias que escalam imediatamente
+    if categoria in ["denuncia_bot", "cheat", "jobfilter", "bug_zeny", "denuncia", "banimento", "pagamento"]:
         resposta = await escalar_suporte(message.channel, categoria)
         definir_estado(canal, "escalado")
         salvar_dados_ticket(canal, pergunta, resposta, categoria)
         salvar_historico(canal, pergunta, resposta, categoria, "escalado")
         return
 
-    if categoria == "denuncia":
-        resposta = await escalar_suporte(message.channel, categoria)
-        definir_estado(canal, "escalado")
-        salvar_dados_ticket(canal, pergunta, resposta, categoria)
-        salvar_historico(canal, pergunta, resposta, categoria, "escalado")
+    # Se já respondeu antes e o usuário disser que não funcionou, escala e silencia
+    if estado in ["respondido", "respondido_memoria", "aguardando_teste_patch"]:
+        if mensagem_igual(pergunta, FALHA_RESPOSTA):
+            resposta = await escalar_suporte(message.channel, categoria)
+            definir_estado(canal, "escalado")
+            salvar_dados_ticket(canal, pergunta, resposta, categoria)
+            salvar_historico(canal, pergunta, resposta, categoria, "escalado")
+            return
+
+        if mensagem_igual(pergunta, SUCESSO_RESPOSTA):
+            resposta = await responder_sucesso(message.channel)
+            definir_estado(canal, "resolvido")
+            salvar_historico(canal, pergunta, resposta, categoria, "resolvido")
+
+            pergunta_original = dados.get("pergunta")
+            resposta_original = dados.get("ultima_resposta")
+
+            if pergunta_original and resposta_original:
+                await asyncio.to_thread(
+                    adicionar_memoria_se_nao_existir,
+                    pergunta_original,
+                    resposta_original,
+                    categoria
+                )
+            return
+
+        # Se já está em conversa ativa e o usuário mandar mais detalhes,
+        # não repete a mesma resposta automaticamente
+        print("Mensagem adicional recebida após resposta inicial; evitando repetição.")
         return
 
+    # Primeiro tenta memória
     resposta_memoria = await tentar_resolver_com_memoria(pergunta, categoria)
 
     if resposta_memoria:
@@ -595,6 +678,7 @@ async def on_message(message):
         salvar_historico(canal, pergunta, resposta, categoria, "respondido_memoria")
         return
 
+    # Resposta padrão inicial
     resposta = await responder_links(message.channel)
     definir_estado(canal, "respondido")
     salvar_dados_ticket(canal, pergunta, resposta, categoria)
