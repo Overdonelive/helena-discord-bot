@@ -1,5 +1,6 @@
 import os
 
+
 TOKEN = os.getenv("TOKEN")
 PATCH_LINK = os.getenv("PATCH_LINK")
 
@@ -8,6 +9,7 @@ OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
 
 LOGS_CHANNEL_ID = int(os.getenv("LOGS_CHANNEL_ID", "0"))
 
+
 def ler_ids(nome):
     valor = os.getenv(nome, "")
 
@@ -15,6 +17,7 @@ def ler_ids(nome):
         return []
 
     return [int(x.strip()) for x in valor.split(",") if x.strip()]
+
 
 RESPONSAVEIS_SEGURANCA = ler_ids("RESPONSAVEIS_SEGURANCA")
 RESPONSAVEIS_DENUNCIAS = ler_ids("RESPONSAVEIS_DENUNCIAS")
