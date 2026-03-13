@@ -404,6 +404,41 @@ https://www.skalro.com.br/wiki/"""
     return texto
 
 
+async def capturar_ultima_resposta_humana_staff(channel, mensagem_resolvido):
+    """
+    Procura a última mensagem humana antes do 'resolvido'.
+    Ignora:
+    - bots
+    - a própria mensagem 'resolvido'
+    - mensagens muito curtas / só confirmação
+    """
+    ignorar = {
+        "resolvido",
+        "resolveu",
+        "sim",
+        "foi resolvido",
+        "ok",
+        "oks",
+        "blz",
+        "beleza"
+    }
+
+    async for msg in channel.history(limit=30, before=mensagem_resolvido):
+        if msg.author.bot:
+            continue
+
+        conteudo = (msg.content or "").strip()
+        if not conteudo:
+            continue
+
+        if conteudo.lower() in ignorar:
+            continue
+
+        return conteudo
+
+    return None
+
+
 @bot.event
 async def on_ready():
     print(f"Helena conectada como {bot.user}")
@@ -437,7 +472,6 @@ async def on_message(message):
 
         texto = extrair_texto_ticket_tool(message.embeds)
 
-        # ignora mensagens automáticas de fechamento do Ticket Tool
         if eh_mensagem_automatica_fechamento(texto):
             print("Mensagem automática de fechamento ignorada.")
             return
@@ -454,27 +488,37 @@ async def on_message(message):
 
     print("Pergunta relevante:", pergunta)
 
+    # Se já foi escalado, Helena só volta a falar com "resolvido"
     if estado == "escalado":
-        if mensagem_igual(pergunta, ["resolvido", "resolveu", "foi resolvido"]):
+        if mensagem_igual(pergunta, ["resolvido", "resolveu", "sim", "foi resolvido"]):
             resposta = await responder_sucesso(message.channel)
             definir_estado(canal, "resolvido")
             salvar_historico(canal, pergunta, resposta, categoria, "resolvido")
 
             pergunta_original = dados_ticket.get("pergunta")
-            resposta_original = dados_ticket.get("ultima_resposta")
             categoria_original = dados_ticket.get("categoria", categoria)
 
-            if pergunta_original and resposta_original:
+            resposta_staff = await capturar_ultima_resposta_humana_staff(
+                message.channel,
+                message
+            )
+
+            if pergunta_original and resposta_staff:
                 await asyncio.to_thread(
                     adicionar_memoria,
                     pergunta_original,
-                    resposta_original,
+                    resposta_staff,
                     categoria_original
                 )
+                print("Aprendizado salvo com resposta humana da staff.")
+            else:
+                print("Não foi possível salvar aprendizado da staff.")
+
             return
 
         return
 
+    # Segurança / denúncias graves
     if categoria in ["denuncia_bot", "cheat", "jobfilter", "bug_zeny"]:
         resposta = await escalar_suporte(message.channel, categoria)
         definir_estado(canal, "escalado")
@@ -510,6 +554,7 @@ async def on_message(message):
         salvar_historico(canal, pergunta, resposta, categoria, "escalado")
         return
 
+    # Fluxo patch
     if estado == "aguardando_teste_patch":
         if mensagem_igual(pergunta, FALHA_RESPOSTA):
             resposta = await escalar_suporte(message.channel, categoria)
@@ -536,6 +581,7 @@ async def on_message(message):
                 )
             return
 
+    # Fluxo aguardando confirmação
     if estado in ["respondido", "respondido_memoria"]:
         if mensagem_igual(pergunta, SUCESSO_RESPOSTA):
             resposta = await responder_sucesso(message.channel)
@@ -563,6 +609,7 @@ async def on_message(message):
 
         return
 
+    # Memória primeiro
     resposta_memoria = await tentar_resolver_com_memoria(pergunta, categoria)
 
     if resposta_memoria:
@@ -573,6 +620,7 @@ async def on_message(message):
         salvar_historico(canal, pergunta, resposta_memoria, categoria, "respondido_memoria")
         return
 
+    # Respostas padrão por links
     if categoria == "duvida_jogo":
         resposta = await responder_links_duvida_jogo(message.channel)
     elif categoria == "duvida_servidor":
