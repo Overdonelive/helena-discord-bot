@@ -46,6 +46,7 @@ SUCESSO_RESPOSTA = [
     "consegui",
     "agora foi",
     "agora funcionou",
+    "sim",
     "sim resolveu",
     "resolvido",
     "foi resolvido"
@@ -311,11 +312,8 @@ def resposta_bot_duplicada(channel_id, texto, janela=8):
     if not ultima:
         return False
 
-    ultimo_texto = ultima["texto"]
-    ultimo_tempo = ultima["tempo"]
-
-    if normalizar_texto(ultimo_texto) == normalizar_texto(texto):
-        if agora - ultimo_tempo <= janela:
+    if normalizar_texto(ultima["texto"]) == normalizar_texto(texto):
+        if agora - ultima["tempo"] <= janela:
             return True
 
     return False
@@ -605,15 +603,12 @@ async def on_message(message):
     print(f"Categoria: {categoria}")
     print(f"Pergunta: {pergunta}")
 
-    # Se já escalou, Helena não responde mais nada além de "resolvido"
-    if estado == "escalado":
-        if mensagem_igual(pergunta, SUCESSO_RESPOSTA):
-            resposta = await responder_sucesso(message.channel)
-            definir_estado(canal, "resolvido")
-            salvar_historico(canal, pergunta, resposta, categoria, "resolvido")
-
-            pergunta_original = dados.get("pergunta")
+    # Confirmação de sucesso só vale se já houve uma resposta antes
+    if estado != "novo" and mensagem_igual(pergunta, SUCESSO_RESPOSTA):
+        # se já estava escalado, tenta aprender da staff
+        if estado == "escalado":
             resposta_staff = await capturar_conversa_staff(message.channel, message)
+            pergunta_original = dados.get("pergunta")
 
             if pergunta_original and resposta_staff:
                 await asyncio.to_thread(
@@ -623,8 +618,26 @@ async def on_message(message):
                     categoria
                 )
 
-            return
+        # se estava respondido/respondido_memoria, aprende da última resposta do bot
+        if estado in ["respondido", "respondido_memoria", "aguardando_teste_patch"]:
+            pergunta_original = dados.get("pergunta")
+            resposta_original = dados.get("ultima_resposta")
 
+            if pergunta_original and resposta_original:
+                await asyncio.to_thread(
+                    adicionar_memoria_se_nao_existir,
+                    pergunta_original,
+                    resposta_original,
+                    categoria
+                )
+
+        resposta = await responder_sucesso(message.channel)
+        definir_estado(canal, "resolvido")
+        salvar_historico(canal, pergunta, resposta, categoria, "resolvido")
+        return
+
+    # Se já escalou, Helena não responde mais nada além de "resolvido"
+    if estado == "escalado":
         print("Ticket escalado: Helena permaneceu em silêncio.")
         return
 
@@ -645,25 +658,6 @@ async def on_message(message):
             salvar_historico(canal, pergunta, resposta, categoria, "escalado")
             return
 
-        if mensagem_igual(pergunta, SUCESSO_RESPOSTA):
-            resposta = await responder_sucesso(message.channel)
-            definir_estado(canal, "resolvido")
-            salvar_historico(canal, pergunta, resposta, categoria, "resolvido")
-
-            pergunta_original = dados.get("pergunta")
-            resposta_original = dados.get("ultima_resposta")
-
-            if pergunta_original and resposta_original:
-                await asyncio.to_thread(
-                    adicionar_memoria_se_nao_existir,
-                    pergunta_original,
-                    resposta_original,
-                    categoria
-                )
-            return
-
-        # Se já está em conversa ativa e o usuário mandar mais detalhes,
-        # não repete a mesma resposta automaticamente
         print("Mensagem adicional recebida após resposta inicial; evitando repetição.")
         return
 
