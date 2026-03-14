@@ -154,7 +154,6 @@ def classificar_ticket(texto):
         "vip",
         "não caiu",
         "nao caiu",
-        "paguei",
         "comprei"
     ]
 
